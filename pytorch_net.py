@@ -185,8 +185,12 @@ class PolicyValueNet:
         current_state = torch.as_tensor(current_state).to(self.device)
 
         # 前向傳播
-        with torch.amp.autocast("cuda"):
-            log_act_probs, value = self.policy_value_net(current_state)
+        with torch.no_grad():
+            if self.use_gpu:
+                with torch.amp.autocast("cuda"):
+                    log_act_probs, value = self.policy_value_net(current_state)
+            else:
+                log_act_probs, value = self.policy_value_net(current_state)
 
         # 轉回 CPU 並處理合法動作
         log_act_probs = log_act_probs.cpu()

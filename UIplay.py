@@ -227,25 +227,24 @@ player_random = MCTS_Pure(500)
 player_dark_craft = MinimaxDarkChessPlayer()
 
 player_RL = MCTSPlayer(policy_value_net.policy_value_fn,
-                                 c_puct=1,
+                                 c_puct=3,
                                  n_playout=500,
                                  is_selfplay=0)
 player_RL2 = MCTSPlayer(policy_value_net.policy_value_fn,
-                                 c_puct=5,
+                                 c_puct=3,
                                  n_playout=500,
                                  is_selfplay=0)
 player_greedy = GreedyPlayer()
 
-player_gpt = ChatGPTPlayer()
+# player_gpt = ChatGPTPlayer() #更動
 # player2 = Human()
 
 board.init_board(start_player)
 p1, p2 = 1, 2
 player_RL.set_player_ind(1)
-player_gpt.set_player_ind(2)
-player_dark_craft.set_player_ind(1)
-player_human.set_player_ind(2)
-players = {p1: player_RL, p2: player_human}
+player_RL2.set_player_ind(2)
+# player_gpt.set_player_ind(2) #更動
+players = {p1: player_RL, p2: player_RL2}
 
 
 # 切换玩家
@@ -307,6 +306,7 @@ while True:
         start_time = time.time()
         move = player_in_turn.get_action(board)  # 当前玩家代理拿到动作
         state = board.current_state()
+        
         #print(board.remain_pieces)
         #show_current_state(state, mode="auto")
         '''

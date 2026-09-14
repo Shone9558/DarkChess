@@ -36,6 +36,9 @@ class MinimaxDarkChessPlayer:
     # ====================== 改良版搜尋 ======================
     def quiescence_search(self, board, alpha, beta, side_player_id, maxDepth, depth):
         """寧靜搜尋：只展開吃子直到穩定。"""
+        ended, winner = board.game_end()
+        if ended:
+            return 0 if winner == -1 else (9999 if winner == board.current_player_id else -9999)
         eat_moves, _ = board.greedys()
         if not eat_moves:
             return 0
@@ -61,6 +64,9 @@ class MinimaxDarkChessPlayer:
 
     def search_upward(self, board, depth, alpha, beta, side_player_id, maxDepth):
         """向上傳遞 + 同分步處理 + 單向搜尋 (negamax style)"""
+        ended, winner = board.game_end()
+        if ended:
+            return 0 if winner == -1 else (9999 if winner == board.current_player_id else -9999)
         # --- 終止條件 ---
         if depth == 0:
             eat_moves, _ = board.greedys()
@@ -124,6 +130,8 @@ class MinimaxDarkChessPlayer:
     # ====================== 動作選擇 ======================
     def get_action(self, board):
         """取得下一步行動"""
+        if board.game_end()[0]:
+            return None
         self.game = Game(board)
         eat_moves, fallback_moves = board.greedys()
         legal_moves = eat_moves + fallback_moves
@@ -182,16 +190,9 @@ class MinimaxDarkChessPlayer:
 
     def _simulate_reveal(self, board, pos):
         """模擬翻出不同棋子後的期望值（結合新搜尋法）"""
-        re_pieces = board.remain_pieces
-        if not re_pieces:
-            return 0
-
-        # 統計棋種機率
-        counts = {}
-        for p in re_pieces:
-            counts[p] = counts.get(p, 0) + 1
-        total = len(re_pieces)
-        possible_pieces = {p: c / total for p, c in counts.items()}
+        y, x = pos
+        action = move_action2move_id[f"{y}{x}{y}{x}"]
+        possible_pieces = dict(board.get_reveal_outcomes(action))
 
         total_value = 0
         for piece, prob in possible_pieces.items():
@@ -207,7 +208,7 @@ class MinimaxDarkChessPlayer:
                 maxDepth=2
             )
 
-            total_value += prob * score
+            total_value -= prob * score
             self._restore_board(board, backup)
 
         return total_value
@@ -226,29 +227,12 @@ class MinimaxDarkChessPlayer:
 
     def _backup_board(self, board):
         """備份棋盤狀態"""
-        return {
-            "state_deque": copy.deepcopy(board.state_deque),
-            "remain_pieces": copy.deepcopy(board.remain_pieces),
-            "current_player_color": board.current_player_color,
-            "current_player_id": board.current_player_id,
-            "last_move": board.last_move,
-            "winner": board.winner,
-            "kill_action": board.kill_action,
-            "first_move": board.first_move,
-            "action_count": board.action_count,
-        }
+        return copy.deepcopy(board.__dict__)
 
     def _restore_board(self, board, backup):
-        """還原棋盤狀態"""
-        board.state_deque = backup["state_deque"]
-        board.remain_pieces = backup["remain_pieces"]
-        board.current_player_color = backup["current_player_color"]
-        board.current_player_id = backup["current_player_id"]
-        board.last_move = backup["last_move"]
-        board.winner = backup["winner"]
-        board.kill_action = backup["kill_action"]
-        board.first_move = backup["first_move"]
-        board.action_count = backup["action_count"]
+        """Restore counters/history as well as pieces after a simulation."""
+        board.__dict__.clear()
+        board.__dict__.update(copy.deepcopy(backup))
 
 
 class ChatGPTPlayer:
