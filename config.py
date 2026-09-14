@@ -1,6 +1,7 @@
 CONFIG = {
     'take_multiplier': 1.2,      #吃棋獎勵
     'kill_action': 15,      #和棋回合数
+    'repetitionlimit': 3,   # 第三次相同局面判和
     'dirichlet': 0.075,       # 国际象棋，0.3；日本将棋，0.15；围棋，0.03
     'play_out': 100,        # 每次移动的模拟次数
     'c_puct': 3,             # u的权重

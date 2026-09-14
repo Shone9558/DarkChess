@@ -118,17 +118,17 @@ class MCTS(object):
         """
         node = self._root
         while(1):
-            if node.is_leaf():
+            if state.game_end()[0] or node.is_leaf():
 
                 break
             # Greedily select next move.
             action, node = node.select(self._c_puct)
             state.do_move(action)
 
-        action_probs, _ = self._policy(state)
         # Check for end of game
         end, winner = state.game_end()
         if not end:
+            action_probs, _ = self._policy(state)
             node.expand(action_probs)
         # Evaluate the leaf node by random rollout
         leaf_value = self._evaluate_rollout(state)
@@ -162,6 +162,8 @@ class MCTS(object):
 
         Return: the selected action
         """
+        if state.game_end()[0]:
+            raise ValueError('Cannot choose an action after game end')
         for n in range(self._n_playout):
             state_copy = copy.deepcopy(state)
             self._playout(state_copy)
