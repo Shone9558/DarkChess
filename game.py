@@ -8,8 +8,7 @@ import time
 import torch
 from matplotlib import pyplot as plt
 from config import CONFIG
-from collections import deque   # 这个队列用来判断长将或长捉
-import random
+from collections import Counter, deque   # 这个队列用来判断长将或长捉
 import random
 
 from pytorch_net import PolicyValueNet
@@ -528,40 +527,68 @@ class Board(object):
 
         return _current_state
 
+    def is_reveal_move(self, move):
+        """只有起終點相同且該格仍覆蓋時，才是合法的翻棋動作。"""
+        action = move_id2move_action.get(move)
+        if action is None:
+            return False
+        y, x, to_y, to_x = map(int, action)
+        return (y, x) == (to_y, to_x) and self.state_deque[-1][y][x] == '暗棋'
+
+    def get_reveal_outcomes(self, move):
+        """按剩餘棋種數量回傳 (棋種, 機率)，不讀取隱藏排列順序。
+
+        保留本專案第一次翻棋必須符合當前玩家顏色的規則。
+        """
+        if not self.is_reveal_move(move):
+            raise ValueError('Move is not a covered-square reveal')
+        counts = Counter(piece for piece in self.remain_pieces
+                         if not self.first_move or piece.startswith(self.current_player_color))
+        total = sum(counts.values())
+        if total == 0:
+            raise ValueError('No eligible pieces remain for this reveal')
+        return [(piece, count / total) for piece, count in counts.items()]
+
     # 根据move对棋盘状态做出改变
-    def do_move(self, move, is_simulate=False):
+    def do_move(self, move, is_simulate=False, revealed_piece=None):
         """
         執行一步移動或翻棋，並更新棋盤狀態與當前玩家。
         
         Args:
             move: 移動的 move_id。
+            is_simulate: 保留舊介面；真實與模擬翻棋使用同一個機率分布。
+            revealed_piece: 指定翻棋結果，供測試或已知結果重播；必須符合規則。
             
         Returns:
             reward: 本次移動產生的獎勵（吃子得分）。
         """
-        self.game_start = True  # 游戏开始
-        self.action_count += 1  # 移动次数加1
+        # 驗證與抽樣都先完成；無效動作／結果不能改動棋盤或回合計數。
+        if move not in self.availables:
+            raise ValueError('Illegal move')
         move_action = move_id2move_action[move]
         flip = False
         start_y, start_x = int(move_action[0]), int(move_action[1])
         end_y, end_x = int(move_action[2]), int(move_action[3])
         if start_x == end_x and start_y == end_y:
             flip = True
+        if flip:
+            outcomes = self.get_reveal_outcomes(move)
+            if revealed_piece is None:
+                pieces, probabilities = zip(*outcomes)
+                revealed_piece = random.choices(pieces, weights=probabilities, k=1)[0]
+            if revealed_piece not in dict(outcomes):
+                raise ValueError('Revealed piece is not an eligible outcome')
+        elif revealed_piece is not None:
+            raise ValueError('Only reveal moves accept revealed_piece')
+        self.game_start = True
+        self.action_count += 1
         state_list = copy.deepcopy(self.state_deque[-1])
         reward = 0.0  # 新增 reward
         # 判断是否吃子
         if flip:
-            if self.first_move:
-                self.first_move = False
-                if not is_simulate:
-                    while self.current_player_color not in self.remain_pieces[0]:
-                        random.shuffle(self.remain_pieces)
-            else:
-                # 模擬推演時絕對不可洗牌，破壞平行宇宙
-                if not is_simulate:
-                    random.shuffle(self.remain_pieces)
-            state_list[end_y][end_x] = self.remain_pieces[0]
-            self.remain_pieces.pop(0)
+            self.first_move = False
+            state_list[end_y][end_x] = revealed_piece
+            self.remain_pieces.remove(revealed_piece)
         elif state_list[end_y][end_x] != '一一':
             reward = self.get_piece_value(state_list[end_y][end_x])
             self.kill_action = 0
@@ -710,6 +737,10 @@ class Game(object):
 
             # 执行一步落子
             reward = self.board.do_move(move)
+            # 翻棋結果已知後，才可沿用對應的搜尋子樹。
+            observe_move = getattr(player, 'observe_move', None)
+            if observe_move is not None:
+                observe_move(self.board, move)
             if reward != 0:
                 rewards.append(reward)
             else:

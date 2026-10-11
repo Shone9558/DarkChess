@@ -202,7 +202,7 @@ class TrainPipeline:
             print("[EVAL] baseline = best_policy_net")
         else:
             # 用 pure MCTS 作 baseline（不使用神經網路）
-            best_mcts_player = MCTS_Pure(self.pure_mcts_playout_num)
+            best_mcts_player = MCTS_Pure(n_playout=self.pure_mcts_playout_num)
             baseline_is_pure_mcts = True
             print(f"[EVAL] baseline = pure MCTS ({self.pure_mcts_playout_num} playouts)")
 
