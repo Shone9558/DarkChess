@@ -5,11 +5,13 @@ import numpy as np
 import copy
 import time
 
+import torch
+from matplotlib import pyplot as plt
 from config import CONFIG
 from collections import Counter, deque   # 这个队列用来判断长将或长捉
 import random
-import random
 
+from pytorch_net import PolicyValueNet
 
 
 def generate_dark_chess_board():
@@ -28,8 +30,6 @@ def load_latest_model(model_dir=".", use_checkpoint=True):
     - 如果 use_checkpoint=True，優先找 checkpoint_xxx.pth
     - 否則使用 current_policy.pth
     """
-    from pytorch_net import PolicyValueNet
-
     model_path = None
     # 如果沒有 checkpoint，或 use_checkpoint=False，就用 current_policy
     if model_path is None:
@@ -193,7 +193,7 @@ def get_legal_moves(state_deque, current_player_color):
     計算當前盤面的所有合法移動。
     
     Args:
-        state_deque: 包含目前盤面的隊列；重複局面由 Board 統一判和。
+        state_deque: 包含歷史盤面狀態的隊列（用於判斷長打/長捉）。
         current_player_color: 當前玩家顏色 ('红' 或 '黑')。
         
     Returns:
@@ -201,6 +201,7 @@ def get_legal_moves(state_deque, current_player_color):
     """
 
     state_list = state_deque[-1]
+    old_state_list = state_deque[-4]
 
     moves = []  # 用来存放所有合法的走子方法
     # state_list是以列表形式表示的, len(state_list) == 10, len(state_list[0]) == 9
@@ -238,7 +239,8 @@ def get_legal_moves(state_deque, current_player_color):
                         target_piece = state_list[ni][nj]
                         m = str(i) + str(j) + str(ni) + str(nj)
                         if target_piece == '一一':
-                            moves.append(m)
+                            if change_state(state_list, m) != old_state_list:
+                                moves.append(m)
                         elif current_player_color not in target_piece  and '炮' not in piece:
                             if '帅' in piece and '兵' in target_piece:
                                 continue
@@ -342,11 +344,7 @@ class Board(object):
         self.state_deque = copy.deepcopy(state_deque_init)
 
     # 初始化棋盘的方法
-    def init_board(self, start_player=None):   # 传入先手玩家的id
-        if start_player is None:
-            start_player = random.choice([1, 2])
-        if start_player not in (1, 2):
-            raise ValueError('start_player must be 1 or 2')
+    def init_board(self, start_player = random.choice([1, 2])):   # 传入先手玩家的id
         # 增加一个颜色到id的映射字典，id到颜色的映射字
         # 永远是红方先移动
 
@@ -383,29 +381,7 @@ class Board(object):
         self.kill_action = 0
         self.game_start = False
         self.action_count = 0   # 游戏动作计数器
-        self.no_progress_limit = int(CONFIG['kill_action'])
-        self.repetition_limit = int(CONFIG.get('repetition_limit', 3))
-        if self.no_progress_limit < 1 or self.repetition_limit < 2:
-            raise ValueError('Invalid terminal-rule limits')
-        self.reset_terminal_history()
-
-    def position_key(self):
-        """Repetition identity: visible board, side, hidden counts and flip rule.
-
-        Deliberately excludes the move clock and neural-network history.
-        The order of indistinguishable remaining pieces is irrelevant.
-        """
-        return (tuple(tuple(row) for row in self.state_deque[-1]),
-                self.current_player_id, self.current_player_color,
-                tuple(sorted(Counter(self.remain_pieces).items())),
-                self.first_move)
-
-    def reset_terminal_history(self):
-        """Start a new history after init/loading a custom position, never midgame."""
         self.winner = None
-        self.terminal_reason = None
-        self.kill_action = 0
-        self._position_counts = Counter({self.position_key(): 1})
 
     def get_dark_positions(self):
         """
@@ -425,12 +401,21 @@ class Board(object):
     def force_reveal(self, pos, piece):
         """
         強制將某個暗棋位置翻成指定棋子（用於模擬翻棋期望）。
-        與真實翻棋共用完整轉移：切換回合、更新計數及終局。
-        呼叫者負責備份並還原完整 Board 狀態。
+        不會隨機，直接覆蓋，並暫存狀態以供還原。
         """
         y, x = pos
-        return self.do_move(move_action2move_id[f"{y}{x}{y}{x}"],
-                            revealed_piece=piece)
+        r, c = pos
+        action = f"{r}{c}{r}{c}"
+        self.last_move = action
+        #print(piece,y,x,sep=" ")
+        self._reveal_backup = copy.deepcopy(self.state_deque[-1])
+        self._remain_backup = copy.deepcopy(self.remain_pieces)
+
+        state_list = copy.deepcopy(self.state_deque[-1])
+        state_list[y][x] = piece
+        self.state_deque.append(state_list)
+        if piece in self.remain_pieces:
+            self.remain_pieces.remove(piece)
 
 
     def get_piece_reveal_plane(self):
@@ -542,65 +527,65 @@ class Board(object):
 
         return _current_state
 
-    def is_flip_action(self, move):
-        """Whether this action reveals a currently covered square."""
-        y, x, ty, tx = map(int, move_id2move_action[move])
-        return (y, x) == (ty, tx) and self.state_deque[-1][y][x] == '暗棋'
+    def is_reveal_move(self, move):
+        """只有起終點相同且該格仍覆蓋時，才是合法的翻棋動作。"""
+        action = move_id2move_action.get(move)
+        if action is None:
+            return False
+        y, x, to_y, to_x = map(int, action)
+        return (y, x) == (to_y, to_x) and self.state_deque[-1][y][x] == '暗棋'
 
     def get_reveal_outcomes(self, move):
-        """Return (piece, probability), respecting the first-flip color rule."""
-        if not self.is_flip_action(move):
-            return []
+        """按剩餘棋種數量回傳 (棋種, 機率)，不讀取隱藏排列順序。
+
+        保留本專案第一次翻棋必須符合當前玩家顏色的規則。
+        """
+        if not self.is_reveal_move(move):
+            raise ValueError('Move is not a covered-square reveal')
         counts = Counter(piece for piece in self.remain_pieces
-                         if not self.first_move or
-                         self.current_player_color in piece)
+                         if not self.first_move or piece.startswith(self.current_player_color))
         total = sum(counts.values())
-        if not total:
-            raise ValueError('No eligible pieces remain for this flip')
+        if total == 0:
+            raise ValueError('No eligible pieces remain for this reveal')
         return [(piece, count / total) for piece, count in counts.items()]
 
     # 根据move对棋盘状态做出改变
-    def do_move(self, move, revealed_piece=None):
+    def do_move(self, move, is_simulate=False, revealed_piece=None):
         """
         執行一步移動或翻棋，並更新棋盤狀態與當前玩家。
         
         Args:
             move: 移動的 move_id。
-            revealed_piece: 可選的指定翻棋結果；省略時依剩餘數量抽樣。
+            is_simulate: 保留舊介面；真實與模擬翻棋使用同一個機率分布。
+            revealed_piece: 指定翻棋結果，供測試或已知結果重播；必須符合規則。
             
         Returns:
             reward: 本次移動產生的獎勵（吃子得分）。
         """
-        if self.game_end()[0]:
-            raise ValueError('Cannot move after game end')
+        # 驗證與抽樣都先完成；無效動作／結果不能改動棋盤或回合計數。
         if move not in self.availables:
             raise ValueError('Illegal move')
-        # Validate chance outcomes before mutating any game state.
-        move_action = move_id2move_action[move]
-        if move_action[:2] == move_action[2:]:
-            outcomes = self.get_reveal_outcomes(move)
-            if not outcomes:
-                raise ValueError('Flip action must target a covered square')
-            pieces, probabilities = zip(*outcomes)
-            if revealed_piece is None:
-                revealed_piece = random.choices(pieces, weights=probabilities, k=1)[0]
-            elif revealed_piece not in pieces:
-                raise ValueError('Piece is not an eligible reveal outcome')
-        elif revealed_piece is not None:
-            raise ValueError('A reveal outcome requires a flip action')
-        self.game_start = True  # 游戏开始
-        self.action_count += 1  # 移动次数加1
         move_action = move_id2move_action[move]
         flip = False
         start_y, start_x = int(move_action[0]), int(move_action[1])
         end_y, end_x = int(move_action[2]), int(move_action[3])
         if start_x == end_x and start_y == end_y:
             flip = True
+        if flip:
+            outcomes = self.get_reveal_outcomes(move)
+            if revealed_piece is None:
+                pieces, probabilities = zip(*outcomes)
+                revealed_piece = random.choices(pieces, weights=probabilities, k=1)[0]
+            if revealed_piece not in dict(outcomes):
+                raise ValueError('Revealed piece is not an eligible outcome')
+        elif revealed_piece is not None:
+            raise ValueError('Only reveal moves accept revealed_piece')
+        self.game_start = True
+        self.action_count += 1
         state_list = copy.deepcopy(self.state_deque[-1])
         reward = 0.0  # 新增 reward
         # 判断是否吃子
         if flip:
-            self.kill_action = 0
             self.first_move = False
             state_list[end_y][end_x] = revealed_piece
             self.remain_pieces.remove(revealed_piece)
@@ -618,37 +603,36 @@ class Board(object):
         # 记录最后一次移动的位置
         self.last_move = move
         self.state_deque.append(state_list)
-        self._position_counts[self.position_key()] += 1
-        self.game_end()
+        eat, fallback = self.greedys()
+        if eat == [] and fallback == []:
+            if self.current_player_color == '红':
+                self.winner = self.color2id['黑']
+            else:
+                self.winner = self.color2id['红']
         return reward
-
+    # 是否产生赢家
     def has_a_winner(self):
-        """Compatibility alias: all callers share game_end()."""
-        return self.game_end()
-
-    def game_end(self):
-        """Project rules, in precedence order (one action = one ply).
-
-        No legal move: side to move loses. Threefold repetition: draw.
-        Consecutive non-capture/non-reveal actions reach limit: draw.
-        Results are sticky until a new game/position is explicitly loaded.
-        Returns (ended, winner_id), with -1 for draw or ongoing.
-        terminal_reason disambiguates the reason for a finished game.
-        """
+        """一共有三种状态，红方胜，黑方胜，平局"""
         if self.winner is not None:
             return True, self.winner
-        if not self.availables:
-            self.winner = 3 - self.current_player_id
-            self.terminal_reason = 'no_legal_moves'
-        elif self._position_counts[self.position_key()] >= self.repetition_limit:
-            self.winner = -1
-            self.terminal_reason = 'threefold_repetition'
-        elif self.kill_action >= self.no_progress_limit:
-            self.winner = -1
-            self.terminal_reason = 'no_progress_limit'
-        else:
-            return False, -1
-        return True, self.winner
+        elif self.kill_action >= CONFIG['kill_action']:  # 平局盤面分數擇優
+            red_strength = self.calc_side_strength('红')
+            black_strength = self.calc_side_strength('黑')
+            if red_strength > black_strength:
+                return True, self.color2id['红']
+            elif black_strength > red_strength:
+                return True, self.color2id['黑']
+            else:
+                return True, -1  # 平局
+        return False, -1
+
+    # 检查当前棋局是否结束
+    def game_end(self):
+        win, winner = self.has_a_winner()
+        if win:
+            return True, winner
+
+        return False, -1
 
     def get_current_player_color(self):
         return self.current_player_color
@@ -705,9 +689,6 @@ class Game(object):
         if is_shown:
             self.graphic(self.board)
         while True:
-            end, winner = self.board.game_end()
-            if end:
-                return winner
             current_player = self.board.get_current_player_id()  # 红子对应的玩家id
             player_in_turn = players[current_player]  # 决定当前玩家的代理
             move = player_in_turn.get_action(self.board)
@@ -725,7 +706,7 @@ class Game(object):
             end, winner = self.board.game_end()
             if end:
                 if winner != -1:
-                    print("Game end. Winner is", players[winner]," ",self.board.id2color[winner],sep="")
+                    print("Game end. Winner is", players[winner]," ",self.board.current_player_color,sep="")
                 else:
                     print("Game end. Tie")
                 return winner
@@ -733,12 +714,14 @@ class Game(object):
     # 使用蒙特卡洛树搜索开始自我对弈，存储游戏状态（状态，蒙特卡洛落子概率，胜负手）三元组用于神经网络训练
     def start_self_play(self, player, is_shown=False, temp=1):
         self.board.init_board()     # 初始化棋盘, start_player=1
+        p1, p2 = 1, 2
         states, mcts_probs, current_players = [], [], []
+        # 开始自我对弈
+        _count = 0
+        eat_count = 0
+        rewards = []
         while True:
-            end, winner = self.board.game_end()
-            if end:
-                player.reset_player()
-                return winner, iter(())
+            _count += 1
             if is_shown:
                 self.graphic(self.board)
             move, move_probs = player.get_action(
@@ -753,7 +736,15 @@ class Game(object):
             # 轉換成 numpy array
 
             # 执行一步落子
-            self.board.do_move(move)
+            reward = self.board.do_move(move)
+            # 翻棋結果已知後，才可沿用對應的搜尋子樹。
+            observe_move = getattr(player, 'observe_move', None)
+            if observe_move is not None:
+                observe_move(self.board, move)
+            if reward != 0:
+                rewards.append(reward)
+            else:
+                rewards.append(0.0)
             end, winner = self.board.game_end()
             if end:
                 # 先生成勝負結果 (winner_z)
@@ -763,8 +754,19 @@ class Game(object):
                     winner_z[np.array(current_players) == winner] = 1.0
                     winner_z[np.array(current_players) != winner] = -1.0
 
-                # Value targets exactly match the shared terminal result.
-                # Capture rewards remain available from do_move(), not in W/D/L.
+                # 2. 吃子分數正規化 (副作用)
+                total_abs = sum(abs(r) for r in rewards) + 1e-8
+                scaled_rewards = np.array([r / total_abs for r in rewards])  # [-1, 1] 之間
+                alpha = 5  # 吃子影響比重 (可以調整 0.1 ~ 0.5)
+
+                # 3. 合併，勝負為主，吃子為輔
+                merged_rewards = winner_z + alpha * scaled_rewards
+
+                # 4. 縮放到 [-1, 1]
+                max_abs = np.max(np.abs(merged_rewards)) + 1e-8
+                merged_rewards = merged_rewards / max_abs
+
+                winner_z = merged_rewards  # 取代掉原本的 winner_z
 
                 red_rewards = [r for r, p in zip(winner_z, current_players) if p == 1]
                 black_rewards = [r for r, p in zip(winner_z, current_players) if p == 2]

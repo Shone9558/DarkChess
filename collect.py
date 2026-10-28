@@ -209,4 +209,4 @@ if __name__ == "__main__":
     # 單進程
     # collecting_pipeline.run()
     # 多進程 (每批 40 局，4 進程)
-    collecting_pipeline.parallel_run(total_games=40, n_procs=4)
+    collecting_pipeline.parallel_run(total_games=4, n_procs=4)

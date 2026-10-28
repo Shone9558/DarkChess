@@ -202,7 +202,7 @@ class TrainPipeline:
             print("[EVAL] baseline = best_policy_net")
         else:
             # 用 pure MCTS 作 baseline（不使用神經網路）
-            best_mcts_player = MCTS_Pure(self.pure_mcts_playout_num)
+            best_mcts_player = MCTS_Pure(n_playout=self.pure_mcts_playout_num)
             baseline_is_pure_mcts = True
             print(f"[EVAL] baseline = pure MCTS ({self.pure_mcts_playout_num} playouts)")
 
@@ -273,6 +273,8 @@ class TrainPipeline:
 
     def run(self):
         try:
+            last_iters = -1
+            
             for i in range(self.start_iter, self.game_batch_num + self.start_iter):
                 if not CONFIG['use_redis']:
                     while True:
@@ -281,7 +283,14 @@ class TrainPipeline:
                                 data_file = pickle.load(data_dict)
                                 self.data_buffer = data_file['data_buffer']
                                 self.iters = data_file['iters']
+
+                            if self.iters == last_iters:
+                                print(f"⏳ 等待收集程式寫入新資料... (目前樣本: {len(self.data_buffer)})")
+                                time.sleep(30) # 等待 30 秒後重新讀取
+                                continue
+
                             print(f'已載入本地資料 ({TRAIN_DATA_PATH})')
+                            last_iters = self.iters # 更新記錄
                             break
                         except Exception as e:
                             print("等待本地數據...", e)
